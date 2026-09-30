@@ -30,6 +30,12 @@ public class OpenGrepProfilesDefinition implements BuiltInQualityProfilesDefinit
   @Override
   public void define(Context context) {
     define(context, RuleCatalog.load(config, languages));
+    String home = SdtRules.home(languages);
+    if (home != null) {
+      NewBuiltInQualityProfile profile = context.createBuiltInQualityProfile(PROFILE_NAME, home);
+      SdtRules.KEYS.forEach(key -> profile.activateRule(SdtRules.REPOSITORY, key));
+      profile.done();
+    }
   }
 
   static void define(Context context, Map<String, List<OpenGrepRule>> catalog) {

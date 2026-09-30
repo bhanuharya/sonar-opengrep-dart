@@ -22,6 +22,12 @@ public class OpenGrepRulesDefinition implements RulesDefinition {
   @Override
   public void define(Context context) {
     define(context, RuleCatalog.load(config, languages));
+    String home = SdtRules.home(languages);
+    if (home != null) {
+      NewRepository repo = context.createRepository(SdtRules.REPOSITORY, home).setName("SDT");
+      SdtRules.define(repo);
+      repo.done();
+    }
   }
 
   static void define(Context context, Map<String, List<OpenGrepRule>> catalog) {

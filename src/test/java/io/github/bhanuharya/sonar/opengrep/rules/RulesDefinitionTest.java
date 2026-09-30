@@ -94,6 +94,61 @@ class RulesDefinitionTest {
   }
 
   @Test
+  void other_languages_are_opt_in(@TempDir Path dir) throws Exception {
+    Files.writeString(dir.resolve("multi.yaml"), """
+      rules:
+        - id: py.rule
+          languages: [python]
+          message: m
+          severity: ERROR
+          metadata: {category: security, confidence: HIGH}
+        - id: k8s.rule
+          languages: [yaml]
+          message: m
+          severity: WARNING
+          metadata: {category: security}
+        - id: manifest.rule
+          languages: [regex]
+          paths: {include: ["**/AndroidManifest.xml"]}
+          message: m
+          severity: ERROR
+      """);
+    Languages installed = installed("dart", "py", "yaml", "xml");
+
+    RulesDefinitionContext listed = new RulesDefinitionContext();
+    new OpenGrepRulesDefinition(new MapSettings().setProperty("sonar.opengrep.rules.directories", dir.toString())
+      .setProperty("sonar.opengrep.languages", "dart, PY ,py").asConfig(), installed).define(listed);
+    assertThat(listed.repositories()).extracting(RulesDefinition.Repository::key)
+      .containsExactlyInAnyOrder("opengrep-dart", "opengrep-py");
+    assertThat(listed.repository("opengrep-py").rule("py.rule").type()).isEqualTo(RuleType.VULNERABILITY);
+
+    RulesDefinitionContext everything = new RulesDefinitionContext();
+    new OpenGrepRulesDefinition(new MapSettings().setProperty("sonar.opengrep.rules.directories", dir.toString())
+      .setProperty("sonar.opengrep.languages", "*").asConfig(), installed).define(everything);
+    assertThat(everything.repositories()).extracting(RulesDefinition.Repository::key)
+      .containsExactlyInAnyOrder("opengrep-dart", "opengrep-py", "opengrep-yaml", "opengrep-xml");
+  }
+
+  @Test
+  void sdt_rules_live_on_the_secrets_language_with_standards() {
+    RulesDefinitionContext context = new RulesDefinitionContext();
+    new OpenGrepRulesDefinition(new MapSettings().asConfig(), installed("dart", "secrets")).define(context);
+    RulesDefinition.Repository sdt = context.repository("sdt");
+    assertThat(sdt.language()).isEqualTo("secrets");
+    assertThat(sdt.rule("secret-in-history").type()).isEqualTo(RuleType.VULNERABILITY);
+    assertThat(sdt.rule("secret-in-history").securityStandards()).contains("cwe:798", "owaspTop10-2021:a7");
+    assertThat(sdt.rule("vulnerable-dependency-unreachable").type()).isEqualTo(RuleType.SECURITY_HOTSPOT);
+
+    BuiltInQualityProfilesDefinition.Context profiles = new BuiltInQualityProfilesDefinition.Context();
+    new OpenGrepProfilesDefinition(new MapSettings().asConfig(), installed("dart", "secrets")).define(profiles);
+    assertThat(profiles.profile("secrets", "OpenGrep Security").rules()).hasSize(4);
+
+    RulesDefinitionContext without = new RulesDefinitionContext();
+    new OpenGrepRulesDefinition(new MapSettings().asConfig(), installed("dart")).define(without);
+    assertThat(without.repository("sdt")).isNull();
+  }
+
+  @Test
   void the_bundled_pack_can_be_switched_off(@TempDir Path dir) {
     MapSettings settings = new MapSettings().setProperty("sonar.opengrep.rules.bundled", "false");
     RulesDefinitionContext context = new RulesDefinitionContext();

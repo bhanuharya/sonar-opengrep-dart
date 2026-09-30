@@ -18,9 +18,9 @@ import java.util.Locale;
  *
  * <ul>
  *   <li>OpenGrep / Semgrep JSON ({@code opengrep scan --json}): a top-level {@code results} array;</li>
- *   <li>SDT canonical findings ({@code findings.json}): a top-level {@code findings} array, of which
- *       only the {@code opengrep} adapter's findings are taken — other scanners' findings have their
- *       own importers.</li>
+ *   <li>SDT canonical findings ({@code findings.json}): a top-level {@code findings} array. OpenGrep
+ *       findings, secrets (gitleaks) and dependency vulnerabilities (Trivy) are taken; anything else
+ *       (misconfigurations, image scans) is left to the generic external-issue import.</li>
  * </ul>
  */
 public final class ReportParser {
@@ -54,7 +54,7 @@ public final class ReportParser {
       JsonObject extra = object(result, "extra");
       JsonObject metadata = object(extra, "metadata");
       String category = string(metadata, "category");
-      findings.add(new ReportFinding(string(result, "check_id"), string(result, "path"),
+      findings.add(ReportFinding.openGrep(string(result, "check_id"), string(result, "path"),
         integer(object(result, "start"), "line"), integer(object(result, "end"), "line"),
         string(extra, "message"), string(extra, "severity"),
         "security".equalsIgnoreCase(category) || metadata.has("cwe")));
@@ -66,16 +66,32 @@ public final class ReportParser {
     List<ReportFinding> findings = new ArrayList<>();
     for (JsonElement element : items) {
       JsonObject finding = element.getAsJsonObject();
-      String adapter = string(object(finding, "scanner"), "adapter");
-      if (!"opengrep".equals(adapter.toLowerCase(Locale.ROOT))) {
-        continue;
-      }
+      String adapter = string(object(finding, "scanner"), "adapter").toLowerCase(Locale.ROOT);
+      String category = string(finding, "category").toLowerCase(Locale.ROOT);
       JsonObject location = object(finding, "location");
-      JsonObject rule = object(finding, "rule");
-      findings.add(new ReportFinding(string(rule, "id"), string(location, "path"),
-        integer(location, "startLine"), integer(location, "endLine"),
-        string(finding, "message"), string(object(finding, "severity"), "canonical"),
-        true));
+      String ruleId = string(object(finding, "rule"), "id");
+      String severity = string(object(finding, "severity"), "canonical");
+      if ("opengrep".equals(adapter)) {
+        findings.add(ReportFinding.openGrep(ruleId, string(location, "path"), integer(location, "startLine"),
+          integer(location, "endLine"), string(finding, "message"), severity, true));
+      } else if ("secret".equals(category)) {
+        findings.add(new ReportFinding(ReportFinding.Kind.SECRET, ruleId, string(location, "path"),
+          integer(location, "startLine"), integer(location, "endLine"), string(finding, "message"), severity, true,
+          string(object(finding, "metadata"), "commit"), null));
+      } else if (category.endsWith("vulnerability") && finding.has("artifact")) {
+        JsonObject artifact = object(finding, "artifact");
+        String fixed = string(artifact, "fixedVersion");
+        if (fixed.isEmpty()) {
+          fixed = string(object(finding, "remediation"), "fixedVersion");
+        }
+        boolean unreachable = "unreachable".equalsIgnoreCase(string(object(finding, "reachability"), "state"));
+        String path = string(location, "path");
+        findings.add(new ReportFinding(ReportFinding.Kind.DEPENDENCY, ruleId,
+          path.isEmpty() ? string(artifact, "target") : path, integer(location, "startLine"),
+          integer(location, "endLine"), "", severity, true, "",
+          new ReportFinding.Dependency(string(artifact, "package"), string(artifact, "installedVersion"), fixed,
+            unreachable)));
+      }
     }
     return findings;
   }

@@ -29,9 +29,14 @@ class OpenGrepSensorTest {
     context.setActiveRules(new ActiveRulesBuilder()
       .addRule(new NewActiveRule.Builder().setRuleKey(RuleKey.of("opengrep-dart", "scp.dart.tls.bad-cert")).build())
       .addRule(new NewActiveRule.Builder().setRuleKey(RuleKey.of("opengrep-dart", "scp.dart.webview.js")).build())
+      .addRule(new NewActiveRule.Builder().setRuleKey(RuleKey.of("sdt", "secret")).build())
+      .addRule(new NewActiveRule.Builder().setRuleKey(RuleKey.of("sdt", "secret-in-history")).build())
+      .addRule(new NewActiveRule.Builder().setRuleKey(RuleKey.of("sdt", "vulnerable-dependency")).build())
+      .addRule(new NewActiveRule.Builder().setRuleKey(RuleKey.of("sdt", "vulnerable-dependency-unreachable")).build())
       .build());
     context.fileSystem().add(file("lib/main.dart", "dart", "void main() {\n  a();\n  b();\n}"));
     context.fileSystem().add(file("android/app/src/main/AndroidManifest.xml", "xml", "<manifest/>\n"));
+    context.fileSystem().add(file("pubspec.lock", null, "packages:\n  http:\n    version: \"0.13.0\"\n  dio:\n    version: \"4.0.0\"\n"));
   }
 
   private DefaultInputFile file(String path, String language, String content) {
@@ -79,6 +84,66 @@ class OpenGrepSensorTest {
 
     assertThat(context.allIssues()).hasSize(1);
     assertThat(context.allExternalIssues()).isEmpty();
+  }
+
+  private static final String SDT_SECRETS_AND_DEPS = """
+    {"findings": [
+      {"scanner": {"adapter": "gitleaks"}, "category": "secret", "rule": {"id": "generic-api-key"},
+       "location": {"path": "lib/main.dart", "startLine": 2, "endLine": 2}, "message": "m",
+       "severity": {"canonical": "high"}, "metadata": {"commit": "e3dfe6dba3987dd8959cc28873fa83e877e1a303"}},
+      {"scanner": {"adapter": "gitleaks"}, "category": "secret", "rule": {"id": "generic-api-key"},
+       "location": {"path": "env/.env", "startLine": 3}, "message": "m",
+       "severity": {"canonical": "high"}, "metadata": {"commit": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"}},
+      {"scanner": {"adapter": "trivy-fs"}, "category": "dependency-vulnerability", "rule": {"id": "CVE-2024-0001"},
+       "location": null, "severity": {"canonical": "critical"},
+       "artifact": {"package": "dio", "installedVersion": "4.0.0", "fixedVersion": "5.0.0", "target": "pubspec.lock"},
+       "reachability": {"state": "reachable"}},
+      {"scanner": {"adapter": "trivy-fs"}, "category": "dependency-vulnerability", "rule": {"id": "GHSA-xxxx"},
+       "location": null, "severity": {"canonical": "low"},
+       "artifact": {"package": "left-pad", "installedVersion": "1.0.0", "target": "package-lock.json"},
+       "reachability": {"state": "unreachable"}}
+    ]}""";
+
+  @Test
+  void secrets_land_on_their_line_or_on_the_project_when_only_in_history() throws Exception {
+    report("findings.json", SDT_SECRETS_AND_DEPS);
+    new OpenGrepSensor().execute(context);
+
+    Issue inCode = issue("secret");
+    assertThat(inCode.primaryLocation().inputComponent().isFile()).isTrue();
+    assertThat(inCode.primaryLocation().textRange().start().line()).isEqualTo(2);
+    Issue history = issue("secret-in-history");
+    assertThat(history.primaryLocation().inputComponent().isFile()).isFalse();
+    assertThat(history.primaryLocation().message()).contains("env/.env:3", "a1b2c3d4e5f6", "rotate");
+  }
+
+  @Test
+  void dependencies_sit_on_the_lockfile_line_and_unreachable_ones_are_hotspot_rules() throws Exception {
+    report("findings.json", SDT_SECRETS_AND_DEPS);
+    new OpenGrepSensor().execute(context);
+
+    Issue reachable = issue("vulnerable-dependency");
+    assertThat(reachable.primaryLocation().inputComponent().isFile()).isTrue();
+    assertThat(reachable.primaryLocation().textRange().start().line()).isEqualTo(4);
+    assertThat(reachable.overriddenSeverity()).isEqualTo(org.sonar.api.batch.rule.Severity.BLOCKER);
+    assertThat(reachable.primaryLocation().message()).contains("CVE-2024-0001", "dio 4.0.0", "upgrade to 5.0.0");
+    Issue unreachable = issue("vulnerable-dependency-unreachable");
+    assertThat(unreachable.primaryLocation().inputComponent().isFile()).isFalse();
+    assertThat(unreachable.primaryLocation().message()).contains("no fixed version", "package-lock.json");
+    assertThat(context.allIssues()).hasSize(4);
+  }
+
+  @Test
+  void inactive_sdt_rules_are_skipped_not_guessed() throws Exception {
+    context.setActiveRules(new ActiveRulesBuilder().build());
+    report("findings.json", SDT_SECRETS_AND_DEPS);
+    new OpenGrepSensor().execute(context);
+    assertThat(context.allIssues()).isEmpty();
+    assertThat(context.allExternalIssues()).isEmpty();
+  }
+
+  private Issue issue(String rule) {
+    return context.allIssues().stream().filter(i -> i.ruleKey().equals(RuleKey.of("sdt", rule))).findFirst().orElseThrow();
   }
 
   @Test

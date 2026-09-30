@@ -20,8 +20,70 @@ import org.sonar.api.server.rule.RulesDefinition.OwaspTop10Version;
  */
 public final class RuleMapper {
 
-  /** The one Sonar language this plugin serves (provided by sonar-flutter). */
+  /** The default Sonar language (provided by sonar-flutter); others are opt-in. */
   public static final String DART = "dart";
+
+  /** OpenGrep language name -> Sonar language key, for the opt-in languages. */
+  private static final Map<String, String> LANGUAGES = Map.ofEntries(
+    Map.entry("dart", "dart"),
+    Map.entry("java", "java"),
+    Map.entry("kotlin", "kotlin"), Map.entry("kt", "kotlin"),
+    Map.entry("python", "py"), Map.entry("py", "py"), Map.entry("python3", "py"),
+    Map.entry("javascript", "js"), Map.entry("js", "js"),
+    Map.entry("typescript", "ts"), Map.entry("ts", "ts"),
+    Map.entry("go", "go"), Map.entry("golang", "go"),
+    Map.entry("php", "php"),
+    Map.entry("ruby", "ruby"), Map.entry("rb", "ruby"),
+    Map.entry("csharp", "cs"), Map.entry("c#", "cs"),
+    Map.entry("scala", "scala"),
+    Map.entry("swift", "swift"),
+    Map.entry("c", "c"), Map.entry("cpp", "cpp"), Map.entry("c++", "cpp"),
+    Map.entry("rust", "rust"),
+    Map.entry("html", "web"),
+    Map.entry("xml", "xml"),
+    Map.entry("terraform", "terraform"), Map.entry("hcl", "terraform"),
+    Map.entry("dockerfile", "docker"), Map.entry("docker", "docker"),
+    Map.entry("json", "json"),
+    Map.entry("yaml", "yaml"));
+
+  /** For generic/regex rules: the file suffix in paths.include -> Sonar language key. */
+  private static final Map<String, String> SUFFIXES = Map.ofEntries(
+    Map.entry(".dart", "dart"), Map.entry(".xml", "xml"), Map.entry(".plist", "xml"),
+    Map.entry(".kt", "kotlin"), Map.entry(".kts", "kotlin"), Map.entry(".java", "java"),
+    Map.entry(".py", "py"), Map.entry(".js", "js"), Map.entry(".ts", "ts"), Map.entry(".go", "go"),
+    Map.entry(".yaml", "yaml"), Map.entry(".yml", "yaml"), Map.entry(".json", "json"),
+    Map.entry(".tf", "terraform"), Map.entry("dockerfile", "docker"));
+
+  /**
+   * The Sonar languages a rule belongs to: an explicit {@code sonar.language}, else its
+   * OpenGrep languages, else (generic/regex rules) the file suffixes it targets.
+   */
+  public static Set<String> languages(OpenGrepRule rule) {
+    Set<String> keys = new LinkedHashSet<>();
+    for (String explicit : rule.metaList("sonar.language")) {
+      keys.add(explicit.toLowerCase(Locale.ROOT));
+    }
+    if (!keys.isEmpty()) {
+      return keys;
+    }
+    for (String language : rule.languages()) {
+      String key = LANGUAGES.get(language);
+      if (key != null) {
+        keys.add(key);
+      }
+    }
+    if (keys.isEmpty()) {
+      for (String glob : rule.includes()) {
+        String lower = glob.toLowerCase(Locale.ROOT);
+        SUFFIXES.forEach((suffix, key) -> {
+          if (lower.endsWith(suffix)) {
+            keys.add(key);
+          }
+        });
+      }
+    }
+    return keys;
+  }
 
   private static final Pattern CWE = Pattern.compile("(?i)CWE-(\\d+)");
   private static final Pattern OWASP = Pattern.compile("(?i)\\bA(\\d{1,2})(?::(\\d{4}))?\\b");
@@ -30,20 +92,9 @@ public final class RuleMapper {
   private RuleMapper() {
   }
 
-  /**
-   * True for a Dart rule: {@code languages: [dart]}, or a generic/regex rule that says
-   * {@code sonar.language: dart} or targets {@code *.dart} files. Rules for any other
-   * language are not published: this plugin is Dart-only.
-   */
+  /** True when the rule targets Dart (by language, explicit sonar.language, or *.dart globs). */
   public static boolean isDart(OpenGrepRule rule) {
-    List<String> explicit = rule.metaList("sonar.language");
-    if (!explicit.isEmpty()) {
-      return explicit.stream().anyMatch(DART::equalsIgnoreCase);
-    }
-    if (rule.languages().contains(DART)) {
-      return true;
-    }
-    return rule.includes().stream().anyMatch(glob -> glob.toLowerCase(Locale.ROOT).endsWith(".dart"));
+    return languages(rule).contains(DART);
   }
 
   /**

@@ -3,6 +3,7 @@ package io.github.bhanuharya.sonar.opengrep.sensor;
 import io.github.bhanuharya.sonar.opengrep.OpenGrepProperties;
 import io.github.bhanuharya.sonar.opengrep.rules.RuleCatalog;
 import io.github.bhanuharya.sonar.opengrep.rules.RuleMapper;
+import io.github.bhanuharya.sonar.opengrep.rules.SdtRules;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.HashSet;
@@ -76,12 +77,25 @@ public class OpenGrepSensor implements Sensor {
     Counts counts, Set<String> seen) {
     FileSystem fs = context.fileSystem();
     InputFile file = finding.path().isEmpty() ? null : fs.inputFile(fs.predicates().hasPath(finding.path()));
-    if (file == null) {
-      counts.skip("file not indexed by SonarQube");
+    String dedupe = finding.kind() + "\u0000" + finding.ruleId() + '\u0000' + finding.path() + '\u0000'
+      + finding.startLine() + '\u0000' + finding.message() + '\u0000' + finding.commit()
+      + '\u0000' + finding.dependency();
+    if (!seen.add(dedupe)) {
+      counts.skip("duplicate result");
       return;
     }
-    if (!seen.add(finding.ruleId() + '\u0000' + file.uri() + '\u0000' + finding.startLine() + '\u0000' + finding.message())) {
-      counts.skip("duplicate result");
+    switch (finding.kind()) {
+      case SECRET:
+        importSecret(context, finding, file, counts);
+        return;
+      case DEPENDENCY:
+        importDependency(context, finding, file, counts);
+        return;
+      default:
+        break;
+    }
+    if (file == null) {
+      counts.skip("file not indexed by SonarQube");
       return;
     }
     RuleKey ruleKey = file.language() == null ? null : activeRule(context, file.language(), finding.ruleId());
@@ -102,6 +116,93 @@ public class OpenGrepSensor implements Sensor {
       .severity(Severity.valueOf(RuleMapper.severity(finding.severity())));
     external.at(location(external.newLocation(), file, finding)).save();
     counts.external++;
+  }
+
+  /**
+   * A secret in a file of the checkout sits on its line; one found only in git history
+   * (the file or line is gone) is raised on the project, because it is still leaked.
+   */
+  private static void importSecret(SensorContext context, ReportFinding finding, InputFile file, Counts counts) {
+    String kind = finding.ruleId().isEmpty() ? "secret" : finding.ruleId();
+    String commit = finding.commit().length() > 12 ? finding.commit().substring(0, 12) : finding.commit();
+    boolean inCheckout = file != null && finding.startLine() >= 1 && finding.startLine() <= file.lines();
+    if (inCheckout) {
+      String message = "Committed secret (" + kind + "). Rotate it, then load it from a secret store.";
+      saveSdtIssue(context, SdtRules.SECRET, file, finding.startLine(), finding.endLine(), message, null, counts);
+      return;
+    }
+    String message = "Secret (" + kind + ") in git history: " + (finding.path().isEmpty() ? "unknown file" : finding.path())
+      + (finding.startLine() > 0 ? ":" + finding.startLine() : "") + (commit.isEmpty() ? "" : " at commit " + commit)
+      + ". It is not in the current checkout but every clone still has it: rotate it.";
+    saveSdtIssue(context, SdtRules.SECRET_IN_HISTORY, null, 0, 0, message, null, counts);
+  }
+
+  /**
+   * A vulnerable dependency sits on the line of its lockfile/manifest that names the
+   * package (or the whole file, or the project when the file is not indexed). One no
+   * source file imports is a Security Hotspot rather than a Vulnerability.
+   */
+  private static void importDependency(SensorContext context, ReportFinding finding, InputFile file, Counts counts) {
+    ReportFinding.Dependency dep = finding.dependency();
+    String advisory = finding.ruleId().isEmpty() ? "A known vulnerability" : finding.ruleId();
+    String message = advisory + " in " + dep.name() + " " + dep.installed()
+      + (dep.fixed().isEmpty() ? " (no fixed version published yet)" : ": upgrade to " + dep.fixed())
+      + (dep.unreachable() ? ". No source file imports this package: confirm it is not loaded at runtime." : ".")
+      + (file == null && !finding.path().isEmpty() ? " Declared in " + finding.path() + "." : "");
+    String rule = dep.unreachable() ? SdtRules.UNREACHABLE_DEPENDENCY : SdtRules.VULNERABLE_DEPENDENCY;
+    int line = file == null ? 0 : Math.max(finding.startLine(), lineMentioning(file, dep.name()));
+    String severity = dep.unreachable() ? null : RuleMapper.severity(finding.severity());
+    saveSdtIssue(context, rule, file, line, line, message, severity, counts);
+  }
+
+  private static void saveSdtIssue(SensorContext context, String ruleKey, InputFile file, int startLine, int endLine,
+    String message, String severity, Counts counts) {
+    RuleKey key = RuleKey.of(SdtRules.REPOSITORY, ruleKey);
+    if (context.activeRules().find(key) == null) {
+      counts.skip("SDT rule " + ruleKey + " not active (activate the sdt repository in the secrets profile)");
+      return;
+    }
+    NewIssue issue = context.newIssue().forRule(key);
+    if (severity != null) {
+      issue.overrideSeverity(Severity.valueOf(severity));
+    }
+    NewIssueLocation location = issue.newLocation().message(truncate(message));
+    if (file == null) {
+      location.on(context.project());
+      counts.projectLevel++;
+    } else {
+      location.on(file);
+      TextRange range = range(file, startLine, endLine);
+      if (range != null) {
+        location.at(range);
+      }
+    }
+    issue.at(location).save();
+    counts.imported++;
+  }
+
+  /** The first line of a manifest or lockfile that names the package, or 0. */
+  static int lineMentioning(InputFile file, String name) {
+    if (name == null || name.isEmpty()) {
+      return 0;
+    }
+    try {
+      String[] lines = file.contents().split("\r?\n", -1);
+      for (int i = 0; i < lines.length; i++) {
+        String line = lines[i];
+        if (line.contains("\"" + name + "\"") || line.contains("'" + name + "'")
+          || line.contains("/" + name + "\"") || line.trim().startsWith(name + ":")) {
+          return i + 1;
+        }
+      }
+    } catch (IOException | RuntimeException e) {
+      return 0;
+    }
+    return 0;
+  }
+
+  private static String truncate(String message) {
+    return message.length() > MAX_MESSAGE ? message.substring(0, MAX_MESSAGE - 1) + "…" : message;
   }
 
   /**
@@ -132,7 +233,7 @@ public class OpenGrepSensor implements Sensor {
       location.at(range);
     }
     String message = finding.message().isBlank() ? finding.ruleId() : finding.message().strip();
-    return location.message(message.length() > MAX_MESSAGE ? message.substring(0, MAX_MESSAGE - 1) + "…" : message);
+    return location.message(truncate(message));
   }
 
   /** The reported lines, clamped to the file; null (a file-level issue) when there is no usable line. */
@@ -157,6 +258,7 @@ public class OpenGrepSensor implements Sensor {
 
   private static final class Counts {
     int imported;
+    int projectLevel;
     int external;
     final Map<String, Integer> skipped = new TreeMap<>();
 
@@ -165,8 +267,8 @@ public class OpenGrepSensor implements Sensor {
     }
 
     void log() {
-      LOG.info("OpenGrep: {} imported on OpenGrep rules, {} as external issues, {} skipped",
-        imported, external, skipped.values().stream().mapToInt(Integer::intValue).sum());
+      LOG.info("OpenGrep: {} imported on native rules ({} on the project), {} as external issues, {} skipped",
+        imported, projectLevel, external, skipped.values().stream().mapToInt(Integer::intValue).sum());
       skipped.forEach((reason, count) -> LOG.info("OpenGrep:   skipped {}: {}", count, reason.toLowerCase(Locale.ROOT)));
     }
   }

@@ -9,4 +9,7 @@
   external issues, and the scanner log accounts for every result.
 - Built-in "OpenGrep Security" Dart profile; `scripts/setup-quality-profile.sh` creates a profile that inherits
   sonar-flutter's rules.
+- `sonar.opengrep.languages` (server): publish rules for more languages than Dart (`*` for all installed).
+- SDT reports: gitleaks secrets and Trivy dependency vulnerabilities become native `sdt` rules. Secrets found only in
+  git history are raised on the project, and dependencies no source imports become Security Hotspots.
 - Bundled Dart/Flutter rule pack (18 rules, each with fixtures) and `examples/flutter-vulnerable`.

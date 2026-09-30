@@ -51,7 +51,7 @@ api POST /api/qualityprofiles/change_parent --data-urlencode "language=$LANGUAGE
 echo "'$NAME' inherits from '$PARENT'"
 
 api POST /api/qualityprofiles/activate_rules --data-urlencode "targetKey=$KEY" \
-  --data-urlencode "repositories=opengrep-$LANGUAGE" \
+  --data-urlencode "repositories=opengrep-$LANGUAGE,sdt" --data-urlencode "languages=$LANGUAGE" \
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print("activated %s OpenGrep rules (%s failed)" % (d.get("succeeded", 0), d.get("failed", 0)))'
 
 if [ "$MAKE_DEFAULT" = "--default" ]; then

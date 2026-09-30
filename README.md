@@ -64,10 +64,26 @@ without it the plugin runs `dart` just to detect the report format.
 | `sonar.opengrep.externalIssuesFallback` | scanner | `true` | A result with no active rule becomes an external issue instead of being dropped |
 | `sonar.opengrep.rules.directories` | server (`sonar.properties`) | — | Extra rule directories loaded at startup (comma-separated) |
 | `sonar.opengrep.rules.bundled` | server (`sonar.properties`) | `true` | `false` publishes only your own directories |
+| `sonar.opengrep.languages` | server (`sonar.properties`) | `dart` | Languages to publish rules for: a list (`dart,py,java`) or `*` for every installed language |
 
 The scanner log accounts for every result, for example
 `OpenGrep: 11 imported on OpenGrep rules, 0 as external issues, 0 skipped`, with a reason for each skip
 (file not indexed, duplicate, no active rule).
+
+## Secrets and vulnerable dependencies (SDT reports)
+
+When the report is an SDT canonical `findings.json`, the plugin also imports gitleaks secrets and Trivy dependency
+vulnerabilities as native rules in the **`sdt`** repository. It lives on the `secrets` language (sonar-text), whose
+profile every project loads:
+
+| Rule | Type | Raised on |
+|---|---|---|
+| `sdt:secret`: secrets should not be committed | Vulnerability (Blocker) | the line in the current checkout |
+| `sdt:secret-in-history`: secrets in git history should be rotated | Vulnerability (Critical) | **the project**: the file or line is gone, but every clone still has it |
+| `sdt:vulnerable-dependency` | Vulnerability (severity from the advisory) | the lockfile/manifest line naming the package |
+| `sdt:vulnerable-dependency-unreachable` | Security Hotspot | the same, when no source file imports the package |
+
+Activate them with `scripts/setup-quality-profile.sh secrets "Sonar way" "Secrets + SDT" --default`.
 
 ## Rule metadata
 
