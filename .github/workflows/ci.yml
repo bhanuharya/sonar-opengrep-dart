@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  OPENGREP_VERSION: v1.29.0
+  SCANNER_VERSION: 6.2.1.4610
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Unit tests and plugin jar
+        run: mvn -B verify
+      - name: Install OpenGrep
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL -o "$HOME/.local/bin/opengrep" \
+            "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86"
+          chmod +x "$HOME/.local/bin/opengrep"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Rule fixtures
+        run: |
+          set -e
+          opengrep scan --test --config rules/dart/security.yaml rules/dart/security.test.dart
+          opengrep scan --test --config rules/flutter/mobile.yaml rules/flutter/mobile.test.dart
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin
+          path: target/sonar-opengrep-plugin-*.jar
+
+  integration:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: sonarqube:9.9-community
+            flutter: "0.5.2"
+          - image: sonarqube:10.7-community
+            flutter: "0.5.2"
+          - image: sonarqube:community
+            flutter: "0.5.2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugin
+          path: plugins
+      - name: sonar-flutter (provides the dart language)
+        run: |
+          curl -sSfL -o plugins/sonar-flutter-plugin.jar \
+            "https://github.com/insideapp-oss/sonar-flutter/releases/download/${{ matrix.flutter }}/sonar-flutter-plugin-${{ matrix.flutter }}.jar"
+      - name: Start SonarQube
+        run: |
+          for jar in plugins/*.jar; do
+            MOUNTS="$MOUNTS -v $PWD/$jar:/opt/sonarqube/extensions/plugins/$(basename "$jar")"
+          done
+          docker run -d --name sonarqube -p 9000:9000 $MOUNTS ${{ matrix.image }}
+          for i in $(seq 1 90); do
+            status=$(curl -s http://localhost:9000/api/system/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' 2>/dev/null || true)
+            [ "$status" = UP ] && break
+            sleep 5
+          done
+          [ "$status" = UP ] || { docker logs sonarqube | tail -100; exit 1; }
+      - name: Admin token
+        # The throwaway container starts with SonarQube's documented default admin
+        # login; replace it with a random password, then mint an analysis token.
+        run: |
+          default_login="admin"
+          password="Ci-$(openssl rand -hex 16)-Pw1!"
+          echo "::add-mask::$password"
+          printf 'user = "%s:%s"\n' "$default_login" "$default_login" | curl -sS -K - -X POST \
+            http://localhost:9000/api/users/change_password --data-urlencode "login=$default_login" \
+            --data-urlencode "previousPassword=$default_login" --data-urlencode "password=$password" || true
+          token=$(printf 'user = "%s:%s"\n' "$default_login" "$password" | curl -sS -K - -X POST \
+            http://localhost:9000/api/user_tokens/generate --data-urlencode name=ci \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+          echo "::add-mask::$token"
+          echo "SONAR_TOKEN=$token" >> "$GITHUB_ENV"
+      - name: Tools
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL -o "$HOME/.local/bin/opengrep" \
+            "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86"
+          chmod +x "$HOME/.local/bin/opengrep"
+          curl -sSfL -o scanner.zip \
+            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SCANNER_VERSION}-linux-x64.zip"
+          unzip -q scanner.zip -d "$HOME/scanner"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "SONAR_SCANNER=$HOME/scanner/sonar-scanner-${SCANNER_VERSION}-linux-x64/bin/sonar-scanner" >> "$GITHUB_ENV"
+      - name: Integration test
+        run: scripts/integration-test.sh
+      - name: SonarQube logs on failure
+        if: failure()
+        run: docker logs sonarqube | tail -200
+
+  release:
+    if: github.event_name == 'release'
+    needs: [build, integration]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugin
+      - name: Attach jar to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" sonar-opengrep-plugin-*.jar --repo "${{ github.repository }}"
