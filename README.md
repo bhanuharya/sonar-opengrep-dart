@@ -111,10 +111,13 @@ became a native issue or hotspot.
 
 Built against the plugin API of SonarQube 9.9 LTA (`pluginApiMinVersion` 9.14).
 
+Every push runs the integration test (sonar-flutter 0.5.2 + this plugin) against:
+
 | SonarQube | Status |
 |---|---|
-| 10.7 Community + sonar-flutter 0.5.2 | tested (unit + integration) |
-| 9.9 LTA, latest | built for; exercised by the CI matrix |
+| 9.9 LTA Community | ✓ tested in CI |
+| 10.7 Community | ✓ tested in CI |
+| latest Community | ✓ tested in CI |
 
 ## Limitations
 
