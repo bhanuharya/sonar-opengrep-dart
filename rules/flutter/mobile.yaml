@@ -18,7 +18,7 @@ rules:
       - pattern: '"$URL"'
       - metavariable-regex:
           metavariable: $URL
-          regex: ^http://(?!localhost|127\.0\.0\.1|10\.0\.2\.2|0\.0\.0\.0)[^\s]+
+          regex: ^http://(?!localhost|127\.0\.0\.1|10\.0\.2\.2|0\.0\.0\.0|www\.w3\.org/|schemas\.)[^\s]+
 
   - id: scp.flutter.storage.shared-preferences-secret
     languages: [dart]

@@ -10,6 +10,8 @@ void network() {
   final secure = Uri.parse("https://api.example.com/v1/orders");
   // ok: scp.flutter.network.cleartext-http
   final emulator = Uri.parse("http://10.0.2.2:8080/debug");
+  // ok: scp.flutter.network.cleartext-http
+  const svgNamespace = "http://www.w3.org/2000/svg";
 }
 
 Future<void> storage(SharedPreferences prefs, String token, FlutterSecureStorage secure) async {
